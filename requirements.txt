@@ -1,6 +1,6 @@
-fastapi
-python-dotenv
-pinecone
-groq
-pydantic-settings
-pypdf
+fastapi==0.115.12
+python-dotenv==1.1.0
+pinecone==6.0.2
+groq==0.23.1
+pydantic-settings==2.9.1
+pypdf==5.4.0

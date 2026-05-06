@@ -2,10 +2,12 @@ import hashlib
 import logging
 import shutil
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, File, Header, HTTPException, UploadFile, status
 from fastapi.responses import JSONResponse
+from pinecone import Pinecone as _Pinecone
 
 from app.config import get_settings
 from app.services.embedding import EmbeddingService
@@ -16,13 +18,18 @@ router = APIRouter(tags=["ingest"])
 
 SUPPORTED = {".md", ".txt", ".pdf"}
 
-# ── Pinecone client (module-level singleton) ──────────────────────────────────
-from pinecone import Pinecone as _Pinecone
 
-_settings = get_settings()
-_pc = _Pinecone(api_key=_settings.pinecone_api_key)
-_index = _pc.Index(_settings.pinecone_index_name)
-_embedder = EmbeddingService()
+# ── Lazy singletons — initialized on first request, not at import time ────────
+@lru_cache(maxsize=1)
+def _get_index():
+    s = get_settings()
+    pc = _Pinecone(api_key=s.pinecone_api_key)
+    return pc.Index(s.pinecone_index_name)
+
+
+@lru_cache(maxsize=1)
+def _get_embedder() -> EmbeddingService:
+    return EmbeddingService()
 
 
 def verify_optional_api_key(x_api_key: str | None = Header(default=None)) -> None:
@@ -39,9 +46,9 @@ def _build_vector_id(filename: str, chunk_num: int, text: str) -> str:
 def _delete_file_vectors(filename: str) -> int:
     """Delete all Pinecone vectors whose 'source' metadata matches filename."""
     s = get_settings()
-    # Use list + delete by IDs approach: fetch all IDs with this source via metadata filter
+    index = _get_index()
     try:
-        result = _index.query(
+        result = index.query(
             vector=[0.0] * s.pinecone_index_dimension,
             top_k=10000,
             include_metadata=True,
@@ -50,7 +57,7 @@ def _delete_file_vectors(filename: str) -> int:
         )
         ids_to_delete = [m.id for m in (result.matches or []) if m.metadata.get("source") == filename]
         if ids_to_delete:
-            _index.delete(ids=ids_to_delete, namespace=s.pinecone_namespace)
+            index.delete(ids=ids_to_delete, namespace=s.pinecone_namespace)
         return len(ids_to_delete)
     except Exception as exc:
         logger.warning("Could not delete old vectors for %s: %s", filename, exc)
@@ -94,7 +101,7 @@ async def upload_and_ingest(
     logger.info("Deleted %d old vectors for '%s'", deleted_count, file.filename)
 
     # Embed + upsert
-    embeddings = _embedder.embed(chunks)
+    embeddings = _get_embedder().embed(chunks)
     vectors = []
     for i, (chunk, vector) in enumerate(zip(chunks, embeddings), start=1):
         vectors.append({
@@ -107,7 +114,7 @@ async def upload_and_ingest(
             },
         })
 
-    _index.upsert(vectors=vectors, namespace=s.pinecone_namespace)
+    _get_index().upsert(vectors=vectors, namespace=s.pinecone_namespace)
     logger.info("Ingested %d chunks from '%s' (replaced %d old)", len(vectors), file.filename, deleted_count)
 
     return JSONResponse({
@@ -125,13 +132,14 @@ def list_indexed_files(
 ) -> JSONResponse:
     """Return a list of distinct source filenames and their chunk counts from Pinecone."""
     s = get_settings()
+    index = _get_index()
     try:
-        stats = _index.describe_index_stats()
+        stats = index.describe_index_stats()
         total = stats.total_vector_count or 0
 
         # Sample up to 10 000 vectors to discover distinct filenames
         dummy_vec = [0.0] * s.pinecone_index_dimension
-        result = _index.query(
+        result = index.query(
             vector=dummy_vec,
             top_k=min(total, 10000) if total > 0 else 1,
             include_metadata=True,

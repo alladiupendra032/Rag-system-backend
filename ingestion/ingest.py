@@ -4,7 +4,6 @@ import logging
 from pathlib import Path
 from typing import Iterable
 
-import tiktoken
 from pypdf import PdfReader
 from pinecone import Pinecone, ServerlessSpec
 
@@ -30,17 +29,16 @@ def clean_text(text: str) -> str:
 
 
 def chunk_text(text: str, chunk_size: int, overlap: int) -> list[str]:
-    encoder = tiktoken.get_encoding("cl100k_base")
-    tokens = encoder.encode(text)
-    chunks: list[str] = []
+    """Pure-Python word-based chunker (no C-extensions, safe for Vercel serverless)."""
+    words = text.split()
+    if not words:
+        return []
     step = max(1, chunk_size - overlap)
-    for i in range(0, len(tokens), step):
-        chunk_tokens = tokens[i : i + chunk_size]
-        if not chunk_tokens:
-            continue
-        chunk = encoder.decode(chunk_tokens).strip()
-        if chunk:
-            chunks.append(chunk)
+    chunks: list[str] = []
+    for i in range(0, len(words), step):
+        chunk = " ".join(words[i : i + chunk_size])
+        if chunk.strip():
+            chunks.append(chunk.strip())
     return chunks
 
 
